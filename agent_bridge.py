@@ -355,7 +355,8 @@ class KeeperAgentBridge:
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             resp = urllib.request.urlopen(req)
-            return json.loads(resp.read()) if resp.length else {}
+            data = resp.read()
+            return json.loads(data) if data else {}
         except Exception as e:
             return {"error": str(e)}
     
