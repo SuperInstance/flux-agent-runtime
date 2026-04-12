@@ -326,3 +326,82 @@ if __name__ == "__main__":
     runtime = FluxAgentRuntime(token)
     agent_name = runtime.boot(ONBOARDING_PROMPT)
     print(f"\n🎯 Next: {agent_name} should pick a task from the board")
+
+
+# ── Keeper-Aware Agent Bridge ───────────────────────────────────────────
+
+class KeeperAgentBridge:
+    """Agent that routes all API calls through the Lighthouse Keeper.
+    
+    Agents never see the GitHub token. All intelligence flows through the keeper.
+    """
+    
+    def __init__(self, keeper_url: str = "http://127.0.0.1:8900", vessel: str = ""):
+        import urllib.request, json, hashlib, time
+        self.keeper = keeper_url
+        self.vessel = vessel or f"flux-{hashlib.md5(str(time.time()).encode()).hexdigest()[:6]}"
+        self.secret = None
+        self.energy = 0
+        self.confidence = 0.3
+    
+    def _req(self, method: str, path: str, body: dict = None) -> dict:
+        import urllib.request, json
+        url = f"{self.keeper}{path}"
+        headers = {"Content-Type": "application/json"}
+        if self.secret:
+            headers["X-Agent-ID"] = self.vessel
+            headers["X-Agent-Secret"] = self.secret
+        data = json.dumps(body).encode() if body else None
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            resp = urllib.request.urlopen(req)
+            return json.loads(resp.read()) if resp.length else {}
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def boot(self) -> str:
+        """Register with keeper and create vessel."""
+        # Register
+        result = self._req("POST", "/register", {"vessel": self.vessel})
+        self.secret = result.get("secret")
+        if not self.secret:
+            raise RuntimeError(f"Registration failed: {result}")
+        
+        print(f"🔐 Registered with keeper: {self.vessel}")
+        
+        # Create vessel repo
+        self._req("POST", "/repo", {"name": self.vessel, 
+                  "description": f"FLUX-native I2I agent via keeper"})
+        
+        # Discover fleet
+        vessels = self._req("GET", "/discover").get("vessels", [])
+        print(f"🔍 Discovered {len(vessels)} fleet vessels")
+        
+        # Read bootcamp
+        bootcamp = self._req("GET", "/file/SuperInstance/oracle1-vessel/for-fleet/WELCOME-OPUS.md")
+        content = bootcamp.get("decoded", "")
+        print(f"📖 Read bootcamp: {len(content)} chars")
+        
+        # Announce via I2I
+        self._req("POST", "/i2i", {
+            "target": "SuperInstance/oracle1-vessel",
+            "type": "DISCOVER",
+            "payload": {"agent": self.vessel, "capabilities": ["keeper-aware"], "confidence": self.confidence},
+            "confidence": self.confidence,
+        })
+        print(f"📨 Sent I2I DISCOVER to Oracle1")
+        
+        # Check status
+        status = self._req("GET", "/status")
+        self.energy = status.get("energy_remaining", 0)
+        print(f"⚡ Energy: {self.energy}")
+        
+        print(f"\n✅ {self.vessel} ONLINE via keeper")
+        return self.vessel
+
+
+if __name__ == "__main__":
+    import sys
+    keeper_url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8900"
+    bridge = KeeperAgentBridge(keeper_url)
+    bridge.boot()
