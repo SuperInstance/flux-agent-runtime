@@ -1,0 +1,45 @@
+; FLUX Agent Bootstrap Program
+; This is what a FLUX-native agent runs on boot
+;
+; The agent:
+; 1. Reads fleet discovery (INSTINCT LISTEN)
+; 2. Checks confidence (CONF_READ)
+; 3. Picks a task (energy-gated)
+; 4. Reports results (WITNESS, MSG_SEND)
+
+; Phase 1: Boot
+    NOP                         ; heartbeat
+    INST_LISTEN                 ; discover fleet
+    CONF_SET4 R0, 0xF          ; set high confidence
+    
+; Phase 2: Check energy
+    ATP_QUERY R0, 0, 0         ; check available energy
+    MOVI R1, 50                ; minimum energy threshold
+    CMP R0, R1                 ; compare
+    BCOND LT, rest             ; if low energy, rest
+    
+; Phase 3: Pick task
+    MOVI R2, 0                 ; task counter = 0
+pick:
+    INSTINCT                   ; check instinct (what am I good at?)
+    CONF_READ                  ; read confidence level
+    CMP R0, 0                  ; confidence > 0?
+    BCOND EQ, done             ; no confidence? done
+    
+    ; Execute task (placeholder for real task logic)
+    ATP_SPEND R0, 0, 20        ; spend energy on task
+    WITNESS                    ; log what happened
+    
+    INC R2                     ; task counter++
+    MOVI R3, 5                 ; max tasks
+    CMP R2, R3                 ; enough tasks?
+    BCOND LT, pick             ; keep going
+    
+    JMP done                   ; all done
+
+rest:
+    INST_REST                  ; regenerate energy
+    JMP pick                   ; try again
+    
+done:
+    HALT                       ; shutdown cleanly
