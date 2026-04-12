@@ -361,7 +361,7 @@ class KeeperAgentBridge:
             return {"error": str(e)}
     
     def boot(self) -> str:
-        """Register with keeper and create vessel."""
+        """Register with keeper, restore baton, create vessel."""
         # Register
         result = self._req("POST", "/register", {"vessel": self.vessel})
         self.secret = result.get("secret")
@@ -370,35 +370,125 @@ class KeeperAgentBridge:
         
         print(f"🔐 Registered with keeper: {self.vessel}")
         
-        # Create vessel repo
-        self._req("POST", "/repo", {"name": self.vessel, 
-                  "description": f"FLUX-native I2I agent via keeper"})
+        # ── Baton restore ──
+        generation = 0
+        handoff = None
+        baton_state = None
+        
+        # Read baton generation
+        gen_result = self._req("GET", f"/file/SuperInstance/{self.vessel}/.baton/GENERATION")
+        gen_text = gen_result.get("content") or gen_result.get("decoded", "")
+        if gen_text and gen_text.strip().isdigit():
+            generation = int(gen_text.strip())
+            print(f"📋 Baton found — Generation {generation}")
+            
+            # Read baton state
+            state_result = self._req("GET", f"/file/SuperInstance/{self.vessel}/.baton/CURRENT/STATE.json")
+            state_text = state_result.get("content") or state_result.get("decoded", "")
+            if state_text:
+                try:
+                    baton_state = json.loads(state_text)
+                    self.energy = baton_state.get("energy", {}).get("remaining", 1000)
+                    self.confidence = baton_state.get("confidence", 0.3)
+                    skills = baton_state.get("skills", {})
+                    if skills:
+                        print(f"   Skills: {list(skills.keys())[:5]}")
+                    threads = baton_state.get("open_threads", [])
+                    if threads:
+                        print(f"   Open threads: {len(threads)}")
+                except: pass
+            
+            # Read handoff letter
+            hf_result = self._req("GET", f"/file/SuperInstance/{self.vessel}/.baton/CURRENT/HANDOFF.md")
+            hf_text = hf_result.get("content") or hf_result.get("decoded", "")
+            if hf_text:
+                handoff = hf_text
+                # Show key sections
+                for section in ["Where Things Stand", "What I'd Do Next"]:
+                    if section.lower() in hf_text.lower():
+                        idx = hf_text.lower().index(section.lower())
+                        end = hf_text.find("\n##", idx + 10)
+                        chunk = hf_text[idx:end if end > 0 else idx+200].strip()
+                        lines = [l for l in chunk.split("\n") if l.strip() and not l.startswith("#")][:2]
+                        print(f"   {section}: {' '.join(lines)[:80]}")
+        else:
+            print(f"📋 No baton — fresh agent (Gen-0)")
+            
+            # Create vessel repo (only for fresh agents)
+            self._req("POST", "/repo", {"name": self.vessel, 
+                      "description": f"FLUX-native I2I agent via keeper"})
         
         # Discover fleet
         vessels = self._req("GET", "/discover").get("vessels", [])
         print(f"🔍 Discovered {len(vessels)} fleet vessels")
         
-        # Read bootcamp
-        bootcamp = self._req("GET", "/file/SuperInstance/oracle1-vessel/for-fleet/WELCOME-OPUS.md")
-        content = bootcamp.get("decoded", "")
-        print(f"📖 Read bootcamp: {len(content)} chars")
-        
         # Announce via I2I
+        announce_type = "BATON_RECEIVED" if generation > 0 else "DISCOVER"
         self._req("POST", "/i2i", {
             "target": "SuperInstance/oracle1-vessel",
-            "type": "DISCOVER",
-            "payload": {"agent": self.vessel, "capabilities": ["keeper-aware"], "confidence": self.confidence},
+            "type": announce_type,
+            "payload": {"agent": self.vessel, "capabilities": ["keeper-aware", "baton-native"],
+                        "confidence": self.confidence, "generation": generation},
             "confidence": self.confidence,
         })
-        print(f"📨 Sent I2I DISCOVER to Oracle1")
+        print(f"📨 Sent I2I {announce_type} to Oracle1")
         
         # Check status
         status = self._req("GET", "/status")
-        self.energy = status.get("energy_remaining", 0)
+        self.energy = status.get("energy", status.get("energy_remaining", self.energy))
         print(f"⚡ Energy: {self.energy}")
         
-        print(f"\n✅ {self.vessel} ONLINE via keeper")
+        gen_label = f"Gen-{generation}" if generation > 0 else "Gen-0 (fresh)"
+        print(f"\n✅ {self.vessel} ONLINE via keeper — {gen_label}")
         return self.vessel
+    
+    def pack_baton(self, who_i_was, where_things_stand, what_i_was_thinking,
+                   what_id_do_next, what_im_uncertain_about,
+                   open_threads=None, tasks_completed=0, tasks_failed=0):
+        """Pack a baton — call when context is running out."""
+        threads_text = "\n".join(f"- {t}" for t in (open_threads or ["None"]))
+        letter = f"""# Handoff Letter
+
+## Who I Was\n{who_i_was}
+
+## Where Things Stand\n{where_things_stand}
+
+## What I Was Thinking\n{what_i_was_thinking}
+
+## What I'd Do Next\n{what_id_do_next}
+
+## What I'm Uncertain About\n{what_im_uncertain_about}
+
+## State\n- Energy: {self.energy}/1000\n- Confidence: {self.confidence}\n- Tasks completed: {tasks_completed}\n- Tasks failed: {tasks_failed}\n\n## Open Threads\n{threads_text}\n\nGood luck. You know more than you think.\n"""
+        
+        # Score the handoff
+        score_result = self._req("POST", "/baton/x/score", {"letter": letter})
+        avg = score_result.get("average", 0)
+        passes = score_result.get("passes", False)
+        print(f"   Handoff score: {avg} ({'PASS' if passes else 'NEEDS WORK'})")
+        
+        if not passes:
+            print(f"   ⚠️ Handoff failed quality gate — rewriting recommended")
+            return None
+        
+        # Write baton files
+        repo = f"SuperInstance/{self.vessel}"
+        gen = 1  # TODO: read current generation
+        
+        self._req("POST", f"/file/{repo}/.baton/GENERATION", {"content": str(gen), "message": f"baton: gen {gen}"})
+        self._req("POST", f"/file/{repo}/.baton/CURRENT/HANDOFF.md", {"content": letter, "message": f"baton: handoff gen-{gen}"})
+        self._req("POST", f"/file/{repo}/.baton/CURRENT/STATE.json", {
+            "content": json.dumps({"energy": {"remaining": self.energy, "budget": 1000},
+                                   "confidence": self.confidence, "open_threads": open_threads or [],
+                                   "tasks_completed": tasks_completed}, indent=2),
+            "message": f"baton: state gen-{gen}"})
+        
+        # Notify keeper
+        self._req("POST", "/i2i", {"target": repo, "type": "BATON_PACKED",
+                    "payload": {"generation": gen, "score": avg}, "confidence": self.confidence})
+        
+        print(f"   ✅ Baton packed — generation {gen}, score {avg}")
+        return {"generation": gen, "score": avg}
 
 
 if __name__ == "__main__":
