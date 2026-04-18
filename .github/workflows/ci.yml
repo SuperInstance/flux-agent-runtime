@@ -9,4 +9,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest tests/ -v --tb=short 2>&1 || true
+      - run: python -m pytest tests/ -v --tb=short
